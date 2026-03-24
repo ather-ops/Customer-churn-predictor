@@ -1,0 +1,11 @@
+customer_id,tenure,monthly_charges,total_charges,contract_type,paperless_billing,payment_method,avg_monthly_gb_download,avg_calls_per_month,customer_service_calls,churn
+CUST001,24,85.5,2052.0,Month-to-month,Yes,Electronic check,25.4,45,3,Yes
+CUST002,36,65.2,2347.2,One year,No,Credit card,15.2,38,1,No
+CUST003,5,105.3,526.5,Month-to-month,Yes,Electronic check,42.1,52,5,Yes
+CUST004,48,45.0,2160.0,Two year,No,Bank transfer,8.5,30,0,No
+CUST005,12,95.0,1140.0,Month-to-month,Yes,Mailed check,35.0,48,2,Yes
+CUST006,60,70.8,4248.0,Two year,No,Credit card,12.3,32,1,No
+CUST007,3,120.0,360.0,Month-to-month,Yes,Electronic check,50.2,65,4,Yes
+CUST008,18,55.5,999.0,One year,Yes,Bank transfer,10.1,28,0,No
+CUST009,30,88.2,2646.0,Month-to-month,Yes,Electronic check,28.7,55,3,Yes
+CUST010,72,42.0,3024.0,Two year,No,Credit card,7.2,25,0,No
