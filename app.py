@@ -8,17 +8,9 @@ import numpy as np
 import joblib
 import plotly.express as px
 import plotly.graph_objects as go
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_curve, auc
+from sklearn.metrics import accuracy_score
 import warnings
 warnings.filterwarnings('ignore')
-
-# Import from your original file
-from customer_churn import (
-    encode_new_customer,  # Your encoding function
-    training_columns,      # Your training columns
-    scaler,               # Your scaler
-    model                 # Your model
-)
 
 # Page config
 st.set_page_config(
@@ -66,8 +58,15 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("### Model Status")
+    
+    # Try to load existing model
+    model_loaded = False
+    model = None
+    scaler = None
+    training_cols = None
+    encode_function = None
+    
     try:
-        # Try to load existing model
         model = joblib.load("churn_model.pkl")
         scaler = joblib.load("scaler.pkl")
         training_cols = joblib.load("training_columns.pkl")
@@ -75,15 +74,33 @@ with st.sidebar:
         model_loaded = True
     except:
         st.warning("No model found. Train model first using your script.")
-        model_loaded = False
     
     st.markdown("---")
     st.markdown("### Instructions")
     st.markdown("""
-    1. First run: `python customer_churn.py`
+    1. First run: python customer_churn.py
     2. This trains and saves the model
     3. Then use this app for predictions
     """)
+
+# Import encode function from customer_churn if needed
+if model_loaded:
+    try:
+        from customer_churn import encode_new_customer
+        encode_function = encode_new_customer
+    except:
+        # Define function if import fails
+        def encode_new_customer(df):
+            contract_encoded = pd.get_dummies(df["contract_type"], prefix="contract")
+            paperless_encoded = pd.get_dummies(df["paperless_billing"], prefix="billing")
+            payment_encoded = pd.get_dummies(df["payment_method"], prefix="payment")
+            df_encoded = df.drop(["contract_type", "paperless_billing", "payment_method"], axis=1)
+            df_final = pd.concat([df_encoded, contract_encoded, paperless_encoded, payment_encoded], axis=1)
+            for col in training_cols:
+                if col not in df_final.columns:
+                    df_final[col] = 0
+            return df_final[training_cols]
+        encode_function = encode_new_customer
 
 # Main content
 if uploaded_file is not None:
@@ -100,7 +117,10 @@ if uploaded_file is not None:
             st.metric("Total Records", len(df))
         with col2:
             if 'churn' in df.columns:
-                churn_count = (df['churn'] == 'Yes').sum() if df['churn'].dtype == 'object' else df['churn'].sum()
+                if df['churn'].dtype == 'object':
+                    churn_count = (df['churn'] == 'Yes').sum()
+                else:
+                    churn_count = df['churn'].sum()
                 st.metric("Churn Count", churn_count)
         with col3:
             st.metric("Features", len(df.columns))
@@ -125,20 +145,20 @@ if uploaded_file is not None:
     with tab2:
         st.header("Make Single Prediction")
         
-        if model_loaded:
+        if model_loaded and encode_function:
             st.subheader("Enter Customer Details")
             
             col1, col2 = st.columns(2)
             
             with col1:
-                tenure = st.number_input("Tenure (months)", 0, 100, 12)
-                monthly_charges = st.number_input("Monthly Charges ($)", 0.0, 200.0, 65.0)
-                total_charges = st.number_input("Total Charges ($)", 0.0, 10000.0, 780.0)
-                avg_gb = st.number_input("Avg Monthly GB Download", 0.0, 200.0, 25.0)
+                tenure = st.number_input("Tenure (months)", min_value=0, max_value=100, value=12)
+                monthly_charges = st.number_input("Monthly Charges ($)", min_value=0.0, max_value=200.0, value=65.0)
+                total_charges = st.number_input("Total Charges ($)", min_value=0.0, max_value=10000.0, value=780.0)
+                avg_gb = st.number_input("Avg Monthly GB Download", min_value=0.0, max_value=200.0, value=25.0)
             
             with col2:
-                avg_calls = st.number_input("Avg Calls per Month", 0, 200, 45)
-                service_calls = st.number_input("Customer Service Calls", 0, 20, 2)
+                avg_calls = st.number_input("Avg Calls per Month", min_value=0, max_value=200, value=45)
+                service_calls = st.number_input("Customer Service Calls", min_value=0, max_value=20, value=2)
                 contract_type = st.selectbox("Contract Type", ["Month-to-month", "One year", "Two year"])
                 paperless_billing = st.selectbox("Paperless Billing", ["Yes", "No"])
                 payment_method = st.selectbox("Payment Method", ["Electronic check", "Credit card", "Bank transfer", "Mailed check"])
@@ -158,8 +178,8 @@ if uploaded_file is not None:
                 }])
                 
                 try:
-                    # Use the encode function from your original file
-                    new_encoded = encode_new_customer(new_customer)
+                    # Use the encode function
+                    new_encoded = encode_function(new_customer)
                     new_scaled = scaler.transform(new_encoded)
                     prediction = model.predict(new_scaled)[0]
                     probability = model.predict_proba(new_scaled)[0]
@@ -208,20 +228,19 @@ if uploaded_file is not None:
     with tab3:
         st.header("Batch Predictions")
         
-        if model_loaded:
+        if model_loaded and encode_function:
             if st.button("Generate Batch Predictions", type="primary"):
                 with st.spinner("Generating predictions for all customers..."):
                     try:
-                        # Use your encoding function on the entire dataset
-                        # First, check if all required columns exist
+                        # Check if all required columns exist
                         required_cols = ['contract_type', 'paperless_billing', 'payment_method']
                         missing_cols = [col for col in required_cols if col not in df.columns]
                         
                         if missing_cols:
                             st.error(f"Missing columns: {missing_cols}")
                         else:
-                            # Encode all customers using your function
-                            df_encoded = encode_new_customer(df)
+                            # Encode all customers
+                            df_encoded = encode_function(df)
                             df_scaled = scaler.transform(df_encoded)
                             
                             # Make predictions
@@ -240,11 +259,17 @@ if uploaded_file is not None:
                                 st.metric("Predicted Churn Rate", f"{pred_churn:.1f}%")
                             with col2:
                                 if 'churn' in df.columns:
-                                    actual_churn = (df['churn'] == 'Yes').mean() * 100 if df['churn'].dtype == 'object' else df['churn'].mean() * 100
+                                    if df['churn'].dtype == 'object':
+                                        actual_churn = (df['churn'] == 'Yes').mean() * 100
+                                    else:
+                                        actual_churn = df['churn'].mean() * 100
                                     st.metric("Actual Churn Rate", f"{actual_churn:.1f}%")
                             with col3:
                                 if 'churn' in df.columns:
-                                    actual_labels = df['churn'].map({'Yes': 1, 'No': 0}) if df['churn'].dtype == 'object' else df['churn']
+                                    if df['churn'].dtype == 'object':
+                                        actual_labels = df['churn'].map({'Yes': 1, 'No': 0})
+                                    else:
+                                        actual_labels = df['churn']
                                     accuracy = (predictions == actual_labels).mean() * 100
                                     st.metric("Model Accuracy", f"{accuracy:.1f}%")
                             
@@ -295,5 +320,3 @@ else:
     ### How to use this application:
     
     1. **First, train the model:**
-       ```bash
-       python customer_churn.py
