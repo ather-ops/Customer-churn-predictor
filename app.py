@@ -1,18 +1,31 @@
-# streamlit_app.py
+"""
+Main Streamlit Application for Customer Churn Prediction
+"""
 import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib
 import plotly.express as px
 import plotly.graph_objects as go
-from customer_churn import encode_new_customer, train_model  # Import from your script
+import os
+import sys
+from pathlib import Path
+
+# Add project root to path
+sys.path.append(str(Path(__file__).parent))
+
+from utils.data_preprocessing import preprocess_data, handle_missing_values
+from utils.model_training import train_churn_model, save_model, load_model
+from utils.prediction import predict_churn, predict_batch
+
 import warnings
 warnings.filterwarnings('ignore')
 
 # Page configuration
 st.set_page_config(
     page_title="Customer Churn Predictor",
-    layout="wide"
+    page_icon="",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # Custom CSS
@@ -20,7 +33,6 @@ st.markdown("""
 <style>
     .main-header {
         font-size: 2.5rem;
-        color: #1E88E5;
         text-align: center;
         padding: 1rem;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -42,39 +54,68 @@ st.markdown("""
         background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
         color: white;
     }
+    .metric-card {
+        background: #f0f2f6;
+        padding: 1rem;
+        border-radius: 10px;
+        text-align: center;
+    }
 </style>
 """, unsafe_allow_html=True)
-
-st.markdown('<div class="main-header">Customer Churn Prediction Pipeline</div>', unsafe_allow_html=True)
 
 # Initialize session state
 if 'model_trained' not in st.session_state:
     st.session_state.model_trained = False
+if 'model' not in st.session_state:
+    st.session_state.model = None
+if 'scaler' not in st.session_state:
+    st.session_state.scaler = None
+if 'training_columns' not in st.session_state:
+    st.session_state.training_columns = None
+
+# Title
+st.markdown('<div class="main-header">Customer Churn Prediction Pipeline</div>', unsafe_allow_html=True)
+st.markdown("### Predict customer churn with machine learning")
 
 # Sidebar
 with st.sidebar:
     st.markdown("### Configuration")
     st.markdown("---")
+    
+    # File upload
     uploaded_file = st.file_uploader("Upload Customer Data (CSV)", type=['csv'])
     
     st.markdown("---")
-    st.markdown("### Model Performance")
+    
+    # Model info
+    st.markdown("### Model Status")
+    if st.session_state.model_trained:
+        st.success("Model is trained and ready")
+    else:
+        st.warning("Model not trained yet")
+    
+    st.markdown("---")
+    st.markdown("### About")
     st.markdown("""
-    - Accuracy: 85-90%
-    - Precision: High
-    - Recall: Balanced
+    This application predicts customer churn using:
+    - Logistic Regression
+    - Feature scaling
+    - One-hot encoding
     """)
 
 # Main content
 if uploaded_file is not None:
+    # Load data
     df = pd.read_csv(uploaded_file)
+    df = handle_missing_values(df)
     
     # Create tabs
     tab1, tab2, tab3, tab4 = st.tabs(["Data Overview", "Model Training", "Make Predictions", "Results"])
     
     with tab1:
         st.markdown("### Dataset Overview")
-        col1, col2, col3 = st.columns(3)
+        
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("Total Customers", f"{len(df):,}")
         with col2:
@@ -83,86 +124,98 @@ if uploaded_file is not None:
                 st.metric("Churn Rate", f"{churn_rate:.1f}%")
         with col3:
             st.metric("Features", len(df.columns))
+        with col4:
+            st.metric("Missing Values", df.isnull().sum().sum())
         
         st.markdown("#### Data Preview")
         st.dataframe(df.head(10), use_container_width=True)
         
         st.markdown("#### Dataset Information")
-        info_df = pd.DataFrame({
-            'Data Type': df.dtypes,
-            'Missing Values': df.isnull().sum(),
-            'Missing %': (df.isnull().sum() / len(df) * 100).round(2)
-        })
-        st.dataframe(info_df, use_container_width=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Basic Statistics**")
+            st.dataframe(df.describe(), use_container_width=True)
+        with col2:
+            st.markdown("**Data Types**")
+            dtype_df = pd.DataFrame(df.dtypes, columns=['Data Type'])
+            dtype_df['Count'] = df.count()
+            dtype_df['Missing'] = df.isnull().sum()
+            st.dataframe(dtype_df, use_container_width=True)
     
     with tab2:
         st.markdown("### Model Training")
         
         if st.button("Train Model", type="primary", use_container_width=True):
-            with st.spinner("Training model..."):
+            with st.spinner("Training model... Please wait"):
                 try:
-                    # Reuse your preprocessing logic from customer_churn.py
-                    df_processed = df.copy()
+                    # Preprocess data
+                    X_scaled, y, training_columns, scaler = preprocess_data(
+                        df, 
+                        target_col='churn',
+                        fit_scaler=True
+                    )
                     
-                    # One-hot encoding
-                    categorical_cols = ['contract_type', 'paperless_billing', 'payment_method']
-                    existing_categorical = [col for col in categorical_cols if col in df_processed.columns]
-                    
-                    if existing_categorical:
-                        contract_encoded = pd.get_dummies(df_processed["contract_type"], prefix="contract")
-                        paperless_encoded = pd.get_dummies(df_processed["paperless_billing"], prefix="billing")
-                        payment_encoded = pd.get_dummies(df_processed["payment_method"], prefix="payment")
-                        
-                        df_encoded = df_processed.drop(existing_categorical, axis=1)
-                        df_final = pd.concat([df_encoded, contract_encoded, paperless_encoded, payment_encoded], axis=1)
-                    else:
-                        df_final = df_processed.copy()
-                    
-                    X = df_final.drop("churn", axis=1) if 'churn' in df_final.columns else None
-                    Y = df["churn"] if 'churn' in df.columns else None
-                    
-                    if X is not None and Y is not None:
-                        Y = Y.map({'Yes': 1, 'No': 0}) if Y.dtype == 'object' else Y
-                        training_columns = X.columns.tolist()
-                        
-                        from sklearn.model_selection import train_test_split
-                        from sklearn.preprocessing import StandardScaler
-                        from sklearn.linear_model import LogisticRegression
-                        
-                        X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
-                        
-                        scaler = StandardScaler()
-                        X_train_scaled = scaler.fit_transform(X_train)
-                        X_test_scaled = scaler.transform(X_test)
-                        
-                        model = LogisticRegression(max_iter=1000, random_state=42)
-                        model.fit(X_train_scaled, Y_train)
-                        
-                        y_pred = model.predict(X_test_scaled)
-                        from sklearn.metrics import accuracy_score
-                        accuracy = accuracy_score(Y_test, y_pred)
+                    if y is not None:
+                        # Train model
+                        results = train_churn_model(X_scaled, y)
                         
                         # Save model artifacts
-                        joblib.dump(model, "churn_model.pkl")
-                        joblib.dump(scaler, "scaler.pkl")
-                        joblib.dump(training_columns, "training_columns.pkl")
+                        save_model(results['model'], scaler, training_columns)
                         
+                        # Store in session state
                         st.session_state.model_trained = True
-                        st.session_state.model = model
+                        st.session_state.model = results['model']
                         st.session_state.scaler = scaler
                         st.session_state.training_columns = training_columns
                         
-                        st.success(f"Model trained successfully! Accuracy: {accuracy:.2%}")
+                        # Display results
+                        st.success(f"Model trained successfully! Accuracy: {results['accuracy']:.2%}")
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown("#### Confusion Matrix")
+                            fig = px.imshow(results['confusion_matrix'], 
+                                          text_auto=True, 
+                                          aspect="auto",
+                                          labels=dict(x="Predicted", y="Actual"),
+                                          x=["No Churn", "Churn"], 
+                                          y=["No Churn", "Churn"])
+                            st.plotly_chart(fig, use_container_width=True)
+                        
+                        with col2:
+                            st.markdown("#### Classification Report")
+                            report_df = pd.DataFrame(results['classification_report']).transpose()
+                            st.dataframe(report_df.round(3), use_container_width=True)
+                        
+                        # ROC Curve
+                        from sklearn.metrics import roc_curve
+                        fpr, tpr, _ = roc_curve(results['y_test'], results['y_prob'])
+                        
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(x=fpr, y=tpr, mode='lines',
+                                                name=f'ROC Curve (AUC = {results["roc_auc"]:.3f})',
+                                                line=dict(color='#667eea', width=2)))
+                        fig.add_trace(go.Scatter(x=[0,1], y=[0,1], mode='lines',
+                                                name='Random Classifier',
+                                                line=dict(dash='dash', color='gray')))
+                        fig.update_layout(title='ROC Curve', 
+                                        xaxis_title='False Positive Rate',
+                                        yaxis_title='True Positive Rate', 
+                                        height=400)
+                        st.plotly_chart(fig, use_container_width=True)
+                        
                     else:
-                        st.error("Required columns not found!")
+                        st.error("Target column 'churn' not found in dataset!")
                         
                 except Exception as e:
-                    st.error(f"Error: {str(e)}")
+                    st.error(f"Error during training: {str(e)}")
     
     with tab3:
         st.markdown("### Make Predictions")
         
         if st.session_state.model_trained:
+            st.markdown("#### Enter Customer Details")
+            
             col1, col2 = st.columns(2)
             with col1:
                 tenure = st.number_input("Tenure (months)", min_value=0, max_value=100, value=12)
@@ -178,8 +231,7 @@ if uploaded_file is not None:
                 payment_method = st.selectbox("Payment Method", ["Electronic check", "Credit card", "Bank transfer", "Mailed check"])
             
             if st.button("Predict Churn", type="primary", use_container_width=True):
-                # Use your encode_new_customer function from customer_churn.py
-                new_customer = pd.DataFrame([{
+                customer_data = {
                     'tenure': tenure,
                     'monthly_charges': monthly_charges,
                     'total_charges': total_charges,
@@ -189,46 +241,38 @@ if uploaded_file is not None:
                     'contract_type': contract_type,
                     'paperless_billing': paperless_billing,
                     'payment_method': payment_method
-                }])
-                
-                def encode_customer(df):
-                    contract_encoded = pd.get_dummies(df["contract_type"], prefix="contract")
-                    paperless_encoded = pd.get_dummies(df["paperless_billing"], prefix="billing")
-                    payment_encoded = pd.get_dummies(df["payment_method"], prefix="payment")
-                    
-                    df_encoded = df.drop(["contract_type", "paperless_billing", "payment_method"], axis=1)
-                    df_final = pd.concat([df_encoded, contract_encoded, paperless_encoded, payment_encoded], axis=1)
-                    
-                    for col in st.session_state.training_columns:
-                        if col not in df_final.columns:
-                            df_final[col] = 0
-                    return df_final[st.session_state.training_columns]
+                }
                 
                 try:
-                    new_encoded = encode_customer(new_customer)
-                    new_scaled = st.session_state.scaler.transform(new_encoded)
-                    prediction = st.session_state.model.predict(new_scaled)[0]
-                    probability = st.session_state.model.predict_proba(new_scaled)[0]
+                    result = predict_churn(
+                        customer_data,
+                        st.session_state.model,
+                        st.session_state.scaler,
+                        st.session_state.training_columns
+                    )
                     
-                    if prediction == 1:
+                    # Display result
+                    if result['churn_prediction'] == 'Yes':
                         st.markdown(f"""
                         <div class="prediction-card prediction-churn">
                             <h2>High Risk of Churn</h2>
-                            <h3>Churn Probability: {probability[1]:.1%}</h3>
+                            <h3>Churn Probability: {result['churn_probability']:.1%}</h3>
+                            <p>Risk Level: {result['risk_level']}</p>
                         </div>
                         """, unsafe_allow_html=True)
                     else:
                         st.markdown(f"""
                         <div class="prediction-card prediction-no-churn">
                             <h2>Low Risk of Churn</h2>
-                            <h3>Churn Probability: {probability[1]:.1%}</h3>
+                            <h3>Churn Probability: {result['churn_probability']:.1%}</h3>
+                            <p>Risk Level: {result['risk_level']}</p>
                         </div>
                         """, unsafe_allow_html=True)
                     
                     # Probability gauge
                     fig = go.Figure(go.Indicator(
                         mode="gauge+number",
-                        value=probability[1] * 100,
+                        value=result['churn_probability'] * 100,
                         title={'text': "Churn Probability (%)"},
                         gauge={
                             'axis': {'range': [None, 100]},
@@ -237,101 +281,110 @@ if uploaded_file is not None:
                                 {'range': [0, 30], 'color': "lightgreen"},
                                 {'range': [30, 70], 'color': "yellow"},
                                 {'range': [70, 100], 'color': "salmon"}
-                            ]
+                            ],
+                            'threshold': {
+                                'line': {'color': "red", 'width': 4},
+                                'thickness': 0.75,
+                                'value': 70
+                            }
                         }
                     ))
                     fig.update_layout(height=400)
                     st.plotly_chart(fig, use_container_width=True)
                     
                 except Exception as e:
-                    st.error(f"Error: {str(e)}")
+                    st.error(f"Error making prediction: {str(e)}")
         else:
-            st.warning("Please train the model first!")
+            st.warning("Please train the model first in the 'Model Training' tab!")
     
     with tab4:
         st.markdown("### Results & Insights")
         
         if st.session_state.model_trained and 'churn' in df.columns:
-            if st.button("Generate Batch Predictions", type="primary"):
-                with st.spinner("Generating predictions..."):
+            if st.button("Generate Batch Predictions", type="primary", use_container_width=True):
+                with st.spinner("Generating predictions for all customers..."):
                     try:
-                        # Similar preprocessing logic
-                        df_processed = df.copy()
-                        categorical_cols = ['contract_type', 'paperless_billing', 'payment_method']
-                        existing_categorical = [col for col in categorical_cols if col in df_processed.columns]
+                        results_df = predict_batch(
+                            df,
+                            st.session_state.model,
+                            st.session_state.scaler,
+                            st.session_state.training_columns
+                        )
                         
-                        if existing_categorical:
-                            contract_encoded = pd.get_dummies(df_processed["contract_type"], prefix="contract")
-                            paperless_encoded = pd.get_dummies(df_processed["paperless_billing"], prefix="billing")
-                            payment_encoded = pd.get_dummies(df_processed["payment_method"], prefix="payment")
-                            
-                            df_encoded = df_processed.drop(existing_categorical, axis=1)
-                            df_final = pd.concat([df_encoded, contract_encoded, paperless_encoded, payment_encoded], axis=1)
-                        else:
-                            df_final = df_processed.copy()
+                        st.success("Predictions generated successfully!")
                         
-                        X_all = df_final.drop("churn", axis=1) if 'churn' in df_final.columns else None
+                        # Summary metrics
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            predicted_churn_rate = (results_df['Predicted_Churn'] == 'Yes').mean() * 100
+                            st.metric("Predicted Churn Rate", f"{predicted_churn_rate:.1f}%")
+                        with col2:
+                            actual_churn_rate = (df['churn'].map({'Yes': 1, 'No': 0}) if df['churn'].dtype == 'object' else df['churn']).mean() * 100
+                            st.metric("Actual Churn Rate", f"{actual_churn_rate:.1f}%")
+                        with col3:
+                            accuracy = (results_df['Predicted_Churn'] == results_df['churn'].map({'Yes': 'Yes', 'No': 'No'})).mean() * 100
+                            st.metric("Model Accuracy", f"{accuracy:.1f}%")
                         
-                        if X_all is not None:
-                            for col in st.session_state.training_columns:
-                                if col not in X_all.columns:
-                                    X_all[col] = 0
-                            
-                            X_all = X_all[st.session_state.training_columns]
-                            X_all_scaled = st.session_state.scaler.transform(X_all)
-                            
-                            predictions = st.session_state.model.predict(X_all_scaled)
-                            probabilities = st.session_state.model.predict_proba(X_all_scaled)
-                            
-                            results_df = df.copy()
-                            results_df['Predicted_Churn'] = ['Yes' if p == 1 else 'No' for p in predictions]
-                            results_df['Churn_Probability'] = [f"{prob[1]:.2%}" for prob in probabilities]
-                            
-                            st.success("Predictions generated!")
-                            
-                            # Summary metrics
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                predicted_churn_rate = (predictions == 1).mean() * 100
-                                st.metric("Predicted Churn Rate", f"{predicted_churn_rate:.1f}%")
-                            with col2:
-                                actual_churn_rate = (df['churn'].map({'Yes': 1, 'No': 0}) if df['churn'].dtype == 'object' else df['churn']).mean() * 100
-                                st.metric("Actual Churn Rate", f"{actual_churn_rate:.1f}%")
-                            with col3:
-                                from sklearn.metrics import accuracy_score
-                                accuracy = accuracy_score(df['churn'].map({'Yes': 1, 'No': 0}) if df['churn'].dtype == 'object' else df['churn'], predictions)
-                                st.metric("Model Accuracy", f"{accuracy:.1%}")
-                            
-                            st.dataframe(results_df, use_container_width=True)
-                            
-                            csv = results_df.to_csv(index=False)
-                            st.download_button(
-                                label="Download Predictions (CSV)",
-                                data=csv,
-                                file_name="churn_predictions.csv",
-                                mime="text/csv",
-                                use_container_width=True
-                            )
-                            
+                        # Risk distribution
+                        st.markdown("#### Risk Distribution")
+                        risk_counts = results_df['Risk_Level'].value_counts()
+                        fig = px.pie(values=risk_counts.values, 
+                                   names=risk_counts.index,
+                                   title="Customer Risk Distribution",
+                                   color_discrete_sequence=['#4facfe', '#ffd93d', '#f5576c'])
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Results table
+                        st.markdown("#### Detailed Results")
+                        display_cols = ['tenure', 'monthly_charges', 'contract_type', 
+                                      'Predicted_Churn', 'Churn_Probability', 'Risk_Level']
+                        if 'churn' in results_df.columns:
+                            display_cols.insert(4, 'churn')
+                        st.dataframe(results_df[display_cols], use_container_width=True)
+                        
+                        # Download button
+                        csv = results_df.to_csv(index=False)
+                        st.download_button(
+                            label="Download Predictions (CSV)",
+                            data=csv,
+                            file_name="churn_predictions.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
+                        
                     except Exception as e:
-                        st.error(f"Error: {str(e)}")
+                        st.error(f"Error generating predictions: {str(e)}")
         else:
             st.info("Train the model first to see batch predictions!")
 
 else:
-    st.info("Upload a CSV file from the sidebar to begin!")
-    st.markdown("""
-    ### How to use this application:
-    1. Upload your customer churn data (CSV format)
-    2. Train the machine learning model
-    3. Make individual or batch predictions
-    4. Download results for further analysis
+    # Welcome screen
+    st.markdown("### Welcome to Customer Churn Predictor")
     
-    The CSV should contain columns like:
-    - tenure, monthly_charges, total_charges
-    - contract_type, paperless_billing, payment_method
-    - churn (target variable)
-    """)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("""
+        #### Data Upload
+        Upload your customer data in CSV format
+        """)
+    with col2:
+        st.markdown("""
+        #### Model Training
+        Train the machine learning model
+        """)
+    with col3:
+        st.markdown("""
+        #### Get Predictions
+        Make individual or batch predictions
+        """)
+    
+    st.markdown("---")
+    st.info("Upload a CSV file from the sidebar to begin!")
 
+# Footer
 st.markdown("---")
-st.markdown("<p style='text-align: center; color: gray;'>Customer Churn Prediction Pipeline</p>", unsafe_allow_html=True)
+st.markdown("""
+<div style='text-align: center; color: gray; padding: 1rem;'>
+    <p>Customer Churn Prediction Pipeline | Built with Streamlit</p>
+</div>
+""", unsafe_allow_html=True)
