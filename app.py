@@ -1,322 +1,227 @@
-"""
-Streamlit App for Customer Churn Prediction
-Uses the pipeline from customer_churn.py
-"""
 import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
-import plotly.express as px
 import plotly.graph_objects as go
-from sklearn.metrics import accuracy_score
-import warnings
-warnings.filterwarnings('ignore')
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+import os
+from datetime import datetime
 
-# Page config
-st.set_page_config(
-    page_title="Customer Churn Predictor",
-    page_icon="",
-    layout="wide"
-)
+st.set_page_config(page_title="Churn Prediction", layout="wide")
 
-# Custom CSS
+# Simple CSS
 st.markdown("""
 <style>
     .main-header {
-        font-size: 2rem;
-        text-align: center;
+        background-color: #1f77b4;
         padding: 1rem;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        border-radius: 10px;
+        text-align: center;
         color: white;
         margin-bottom: 2rem;
+        border-radius: 5px;
     }
-    .prediction-card {
-        padding: 1rem;
-        border-radius: 10px;
+    .prediction-box {
+        border: 2px solid #1f77b4;
+        padding: 1.5rem;
         text-align: center;
         margin: 1rem 0;
+        border-radius: 10px;
     }
-    .churn-high {
-        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-        color: white;
+    .risk-high {
+        background-color: #ffcccc;
+        border-color: #ff0000;
     }
-    .churn-low {
-        background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+    .risk-low {
+        background-color: #ccffcc;
+        border-color: #00aa00;
+    }
+    .risk-medium {
+        background-color: #ffffcc;
+        border-color: #ffaa00;
+    }
+    .stButton button {
+        background-color: #1f77b4;
         color: white;
+        width: 100%;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Title
-st.markdown('<div class="main-header">Customer Churn Prediction Pipeline</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header"><h1>Customer Churn Prediction System</h1></div>', unsafe_allow_html=True)
+
+# Initialize session state
+if 'model_trained' not in st.session_state:
+    st.session_state.model_trained = False
+if 'model' not in st.session_state:
+    st.session_state.model = None
+if 'scaler' not in st.session_state:
+    st.session_state.scaler = None
+if 'training_cols' not in st.session_state:
+    st.session_state.training_cols = None
 
 # Sidebar
 with st.sidebar:
-    st.markdown("### Configuration")
-    uploaded_file = st.file_uploader("Upload Customer Data (CSV)", type=['csv'])
+    st.subheader("Data Upload")
+    uploaded_file = st.file_uploader("Choose CSV file", type=['csv'])
     
     st.markdown("---")
-    st.markdown("### Model Status")
+    st.subheader("Model Status")
     
-    # Try to load existing model
-    model_loaded = False
-    model = None
-    scaler = None
-    training_cols = None
-    encode_function = None
-    
-    try:
-        model = joblib.load("churn_model.pkl")
-        scaler = joblib.load("scaler.pkl")
-        training_cols = joblib.load("training_columns.pkl")
-        st.success("Model loaded successfully")
-        model_loaded = True
-    except:
-        st.warning("No model found. Train model first using your script.")
-    
-    st.markdown("---")
-    st.markdown("### Instructions")
-    st.markdown("""
-    1. First run: python customer_churn.py
-    2. This trains and saves the model
-    3. Then use this app for predictions
-    """)
-
-# Import encode function from customer_churn if needed
-if model_loaded:
-    try:
-        from customer_churn import encode_new_customer
-        encode_function = encode_new_customer
-    except:
-        # Define function if import fails
-        def encode_new_customer(df):
-            contract_encoded = pd.get_dummies(df["contract_type"], prefix="contract")
-            paperless_encoded = pd.get_dummies(df["paperless_billing"], prefix="billing")
-            payment_encoded = pd.get_dummies(df["payment_method"], prefix="payment")
-            df_encoded = df.drop(["contract_type", "paperless_billing", "payment_method"], axis=1)
-            df_final = pd.concat([df_encoded, contract_encoded, paperless_encoded, payment_encoded], axis=1)
-            for col in training_cols:
-                if col not in df_final.columns:
-                    df_final[col] = 0
-            return df_final[training_cols]
-        encode_function = encode_new_customer
+    if os.path.exists("churn_model.pkl"):
+        try:
+            st.session_state.model = joblib.load("churn_model.pkl")
+            st.session_state.scaler = joblib.load("scaler.pkl")
+            st.session_state.training_cols = joblib.load("training_columns.pkl")
+            st.session_state.model_trained = True
+            st.success("Model ready")
+        except Exception as e:
+            st.warning(f"Model error: {str(e)}")
+    else:
+        st.info("No model found")
 
 # Main content
-if uploaded_file is not None:
-    df = pd.read_csv(uploaded_file)
-    
-    # Tabs
-    tab1, tab2, tab3 = st.tabs(["Data Overview", "Make Predictions", "Batch Results"])
-    
-    with tab1:
-        st.header("Dataset Overview")
+if uploaded_file:
+    try:
+        uploaded_file.seek(0)
+        df = pd.read_csv(uploaded_file)
         
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Records", len(df))
-        with col2:
-            if 'churn' in df.columns:
-                if df['churn'].dtype == 'object':
-                    churn_count = (df['churn'] == 'Yes').sum()
-                else:
-                    churn_count = df['churn'].sum()
-                st.metric("Churn Count", churn_count)
-        with col3:
-            st.metric("Features", len(df.columns))
+        if 'customer_id' in df.columns:
+            df = df.drop('customer_id', axis=1)
+            st.info("Removed customer_id column (not used for prediction)")
+        
+        has_churn = 'churn' in df.columns
+        st.success(f"Loaded: {len(df)} rows, {len(df.columns)} columns")
         
         st.subheader("Data Preview")
-        st.dataframe(df.head(10))
+        st.dataframe(df.head(), use_container_width=True)
         
-        st.subheader("Data Information")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write("**Basic Statistics**")
-            st.dataframe(df.describe())
-        with col2:
-            st.write("**Missing Values**")
-            missing_df = pd.DataFrame({
-                'Column': df.columns,
-                'Missing': df.isnull().sum(),
-                'Percentage': (df.isnull().sum() / len(df) * 100).round(2)
-            })
-            st.dataframe(missing_df)
-    
-    with tab2:
-        st.header("Make Single Prediction")
-        
-        if model_loaded and encode_function:
-            st.subheader("Enter Customer Details")
-            
+        if has_churn:
+            st.subheader("Model Training")
             col1, col2 = st.columns(2)
-            
             with col1:
-                tenure = st.number_input("Tenure (months)", min_value=0, max_value=100, value=12)
-                monthly_charges = st.number_input("Monthly Charges ($)", min_value=0.0, max_value=200.0, value=65.0)
-                total_charges = st.number_input("Total Charges ($)", min_value=0.0, max_value=10000.0, value=780.0)
-                avg_gb = st.number_input("Avg Monthly GB Download", min_value=0.0, max_value=200.0, value=25.0)
-            
+                st.write(f"**Total Records:** {len(df)}")
+                st.write(f"**Features:** {len(df.columns) - 1}")
             with col2:
-                avg_calls = st.number_input("Avg Calls per Month", min_value=0, max_value=200, value=45)
-                service_calls = st.number_input("Customer Service Calls", min_value=0, max_value=20, value=2)
-                contract_type = st.selectbox("Contract Type", ["Month-to-month", "One year", "Two year"])
-                paperless_billing = st.selectbox("Paperless Billing", ["Yes", "No"])
-                payment_method = st.selectbox("Payment Method", ["Electronic check", "Credit card", "Bank transfer", "Mailed check"])
+                churn_count = (df['churn'] == 'Yes').sum() if df['churn'].dtype == 'object' else df['churn'].sum()
+                st.write(f"**Churn Count:** {churn_count}")
+                st.write(f"**Churn Rate:** {(churn_count/len(df)*100):.1f}%")
             
-            if st.button("Predict Churn", type="primary"):
-                # Create customer dataframe
-                new_customer = pd.DataFrame([{
-                    'tenure': tenure,
-                    'monthly_charges': monthly_charges,
-                    'total_charges': total_charges,
-                    'avg_monthly_gb_download': avg_gb,
-                    'avg_calls_per_month': avg_calls,
-                    'customer_service_calls': service_calls,
-                    'contract_type': contract_type,
-                    'paperless_billing': paperless_billing,
-                    'payment_method': payment_method
-                }])
-                
-                try:
-                    # Use the encode function
-                    new_encoded = encode_function(new_customer)
-                    new_scaled = scaler.transform(new_encoded)
-                    prediction = model.predict(new_scaled)[0]
-                    probability = model.predict_proba(new_scaled)[0]
-                    
-                    # Display result
-                    if prediction == 1:
-                        st.markdown(f"""
-                        <div class="prediction-card churn-high">
-                            <h2>High Risk of Churn</h2>
-                            <h3>Churn Probability: {probability[1]:.1%}</h3>
-                            <p>The customer has a {probability[1]:.1%} probability of churning.</p>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    else:
-                        st.markdown(f"""
-                        <div class="prediction-card churn-low">
-                            <h2>Low Risk of Churn</h2>
-                            <h3>Churn Probability: {probability[1]:.1%}</h3>
-                            <p>The customer has a {probability[1]:.1%} probability of churning.</p>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    # Probability gauge
-                    fig = go.Figure(go.Indicator(
-                        mode="gauge+number",
-                        value=probability[1] * 100,
-                        title={'text': "Churn Probability (%)"},
-                        gauge={
-                            'axis': {'range': [0, 100]},
-                            'bar': {'color': "#f5576c"},
-                            'steps': [
-                                {'range': [0, 30], 'color': "lightgreen"},
-                                {'range': [30, 70], 'color': "yellow"},
-                                {'range': [70, 100], 'color': "salmon"}
-                            ]
-                        }
-                    ))
-                    fig.update_layout(height=300)
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
-        else:
-            st.warning("Model not loaded. Please run customer_churn.py first to train the model.")
-    
-    with tab3:
-        st.header("Batch Predictions")
-        
-        if model_loaded and encode_function:
-            if st.button("Generate Batch Predictions", type="primary"):
-                with st.spinner("Generating predictions for all customers..."):
+            if st.button("Train Model", use_container_width=True):
+                with st.spinner("Training model..."):
                     try:
-                        # Check if all required columns exist
-                        required_cols = ['contract_type', 'paperless_billing', 'payment_method']
-                        missing_cols = [col for col in required_cols if col not in df.columns]
-                        
-                        if missing_cols:
-                            st.error(f"Missing columns: {missing_cols}")
-                        else:
-                            # Encode all customers
-                            df_encoded = encode_function(df)
-                            df_scaled = scaler.transform(df_encoded)
-                            
-                            # Make predictions
-                            predictions = model.predict(df_scaled)
-                            probabilities = model.predict_proba(df_scaled)
-                            
-                            # Create results dataframe
-                            results_df = df.copy()
-                            results_df['Predicted_Churn'] = ['Yes' if p == 1 else 'No' for p in predictions]
-                            results_df['Churn_Probability'] = [f"{prob[1]:.1%}" for prob in probabilities]
-                            
-                            # Show summary
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                pred_churn = (predictions == 1).mean() * 100
-                                st.metric("Predicted Churn Rate", f"{pred_churn:.1f}%")
-                            with col2:
-                                if 'churn' in df.columns:
-                                    if df['churn'].dtype == 'object':
-                                        actual_churn = (df['churn'] == 'Yes').mean() * 100
-                                    else:
-                                        actual_churn = df['churn'].mean() * 100
-                                    st.metric("Actual Churn Rate", f"{actual_churn:.1f}%")
-                            with col3:
-                                if 'churn' in df.columns:
-                                    if df['churn'].dtype == 'object':
-                                        actual_labels = df['churn'].map({'Yes': 1, 'No': 0})
-                                    else:
-                                        actual_labels = df['churn']
-                                    accuracy = (predictions == actual_labels).mean() * 100
-                                    st.metric("Model Accuracy", f"{accuracy:.1f}%")
-                            
-                            # Risk distribution
-                            risk_levels = []
-                            for prob in probabilities:
-                                if prob[1] < 0.3:
-                                    risk_levels.append('Low Risk')
-                                elif prob[1] < 0.7:
-                                    risk_levels.append('Medium Risk')
+                        df_clean = df.copy()
+                        for col in df_clean.columns:
+                            if col != 'churn':
+                                if df_clean[col].dtype == 'object':
+                                    df_clean[col].fillna(df_clean[col].mode()[0] if not df_clean[col].mode().empty else 'Unknown', inplace=True)
                                 else:
-                                    risk_levels.append('High Risk')
-                            
-                            results_df['Risk_Level'] = risk_levels
-                            
-                            st.subheader("Risk Distribution")
-                            risk_counts = pd.Series(risk_levels).value_counts()
-                            fig = px.pie(values=risk_counts.values, 
-                                       names=risk_counts.index,
-                                       title="Customer Risk Distribution",
-                                       color_discrete_sequence=['#4facfe', '#ffd93d', '#f5576c'])
-                            st.plotly_chart(fig, use_container_width=True)
-                            
-                            # Display results
-                            st.subheader("Detailed Results")
-                            display_cols = ['tenure', 'monthly_charges', 'contract_type', 'Predicted_Churn', 'Churn_Probability', 'Risk_Level']
-                            available_cols = [col for col in display_cols if col in results_df.columns]
-                            st.dataframe(results_df[available_cols])
-                            
-                            # Download button
-                            csv = results_df.to_csv(index=False)
-                            st.download_button(
-                                label="Download Predictions (CSV)",
-                                data=csv,
-                                file_name="churn_predictions.csv",
-                                mime="text/csv"
-                            )
-                            
+                                    df_clean[col].fillna(df_clean[col].median(), inplace=True)
+                        
+                        cat_cols = ['contract_type', 'paperless_billing', 'payment_method']
+                        existing_cats = [c for c in cat_cols if c in df_clean.columns]
+                        
+                        if existing_cats:
+                            df_encoded = pd.get_dummies(df_clean, columns=existing_cats, drop_first=False)
+                        else:
+                            df_encoded = df_clean.copy()
+                        
+                        X = df_encoded.drop('churn', axis=1)
+                        y = df_encoded['churn']
+                        
+                        if y.dtype == 'object':
+                            y = y.map({'Yes': 1, 'No': 0})
+                        
+                        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+                        
+                        scaler = StandardScaler()
+                        X_train_scaled = scaler.fit_transform(X_train)
+                        X_test_scaled = scaler.transform(X_test)
+                        
+                        model = LogisticRegression(max_iter=1000, random_state=42)
+                        model.fit(X_train_scaled, y_train)
+                        
+                        y_pred = model.predict(X_test_scaled)
+                        accuracy = accuracy_score(y_test, y_pred)
+                        
+                        joblib.dump(model, "churn_model.pkl")
+                        joblib.dump(scaler, "scaler.pkl")
+                        joblib.dump(X.columns.tolist(), "training_columns.pkl")
+                        
+                        st.session_state.model = model
+                        st.session_state.scaler = scaler
+                        st.session_state.training_cols = X.columns.tolist()
+                        st.session_state.model_trained = True
+                        
+                        st.success(f"Model trained! Accuracy: {accuracy:.2%}")
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.write("**Confusion Matrix**")
+                            cm = confusion_matrix(y_test, y_pred)
+                            cm_df = pd.DataFrame(cm, index=['Actual No Churn', 'Actual Churn'], columns=['Predicted No Churn', 'Predicted Churn'])
+                            st.dataframe(cm_df)
+                        with col2:
+                            st.write("**Classification Report**")
+                            report = classification_report(y_test, y_pred, output_dict=True)
+                            st.dataframe(pd.DataFrame(report).transpose().round(3))
                     except Exception as e:
-                        st.error(f"Error: {str(e)}")
+                        st.error(f"Training error: {str(e)}")
+        
         else:
-            st.warning("Model not loaded. Please run customer_churn.py first to train the model.")
+            st.subheader("Make Predictions")
+            if st.session_state.model_trained:
+                st.write("### Single Customer Prediction")
+                col1, col2 = st.columns(2)
+                with col1:
+                    tenure = st.number_input("Tenure (months)", 0, 100, 12)
+                    monthly_charges = st.number_input("Monthly Charges ($)", 0.0, 200.0, 65.0)
+                    total_charges = st.number_input("Total Charges ($)", 0.0, 10000.0, 780.0)
+                    avg_gb = st.number_input("Avg Monthly GB Download", 0.0, 200.0, 25.0)
+                with col2:
+                    avg_calls = st.number_input("Avg Calls per Month", 0, 200, 45)
+                    service_calls = st.number_input("Customer Service Calls", 0, 20, 2)
+                    contract = st.selectbox("Contract Type", ["Month-to-month", "One year", "Two year"])
+                    paperless = st.selectbox("Paperless Billing", ["Yes", "No"])
+                    payment = st.selectbox("Payment Method", ["Electronic check", "Credit card", "Bank transfer", "Mailed check"])
+                
+                if st.button("Predict Customer", use_container_width=True):
+                    customer = pd.DataFrame([{
+                        'tenure': tenure, 'monthly_charges': monthly_charges, 'total_charges': total_charges,
+                        'avg_monthly_gb_download': avg_gb, 'avg_calls_per_month': avg_calls,
+                        'customer_service_calls': service_calls, 'contract_type': contract,
+                        'paperless_billing': paperless, 'payment_method': payment
+                    }])
+                    
+                    try:
+                        customer_encoded = pd.get_dummies(customer, columns=['contract_type', 'paperless_billing', 'payment_method'])
+                        for col in st.session_state.training_cols:
+                            if col not in customer_encoded.columns:
+                                customer_encoded[col] = 0
+                        customer_encoded = customer_encoded[st.session_state.training_cols]
+                        customer_scaled = st.session_state.scaler.transform(customer_encoded)
+                        
+                        pred = st.session_state.model.predict(customer_scaled)[0]
+                        prob = st.session_state.model.predict_proba(customer_scaled)[0]
+                        
+                        risk_class = "risk-high" if prob[1] >= 0.7 else ("risk-medium" if prob[1] >= 0.3 else "risk-low")
+                        risk_text = "High Risk" if prob[1] >= 0.7 else ("Medium Risk" if prob[1] >= 0.3 else "Low Risk")
+                        
+                        st.markdown(f'<div class="prediction-box {risk_class}"><h2>{risk_text} of Churn</h2><h3>Probability: {prob[1]:.1%}</h3></div>', unsafe_allow_html=True)
+                        
+                        fig = go.Figure(go.Indicator(
+                            mode="gauge+number", value=prob[1] * 100, title={"text": "Churn Risk Score"},
+                            gauge={"axis": {"range": [0, 100]}, "bar": {"color": "#1f77b4"},
+                                   "steps": [{"range": [0, 30], "color": "#ccffcc"}, {"range": [30, 70], "color": "#ffffcc"}, {"range": [70, 100], "color": "#ffcccc"}],
+                                   "threshold": {"line": {"color": "red", "width": 4}, "thickness": 0.75, "value": 70}}))
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Prediction error: {str(e)}")
+            else:
+                st.warning("No trained model found. Please upload training data first.")
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
 else:
-    # Welcome screen
-    st.info("Please upload a CSV file from the sidebar to begin")
-    
-    st.markdown("""
-    ### How to use this application:
-    
-    1. **First, train the model:**
+    st.info("Please upload a CSV file to begin")
