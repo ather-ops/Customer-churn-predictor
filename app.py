@@ -553,7 +553,7 @@ st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: #666;'>"
     "Churn Prediction System | Built with Streamlit | "
-    f"v1.0 | {datetime.now().year}"
+    f"V2.0 | {datetime.now().year}"
     "</div>",
     unsafe_allow_html=True
 )
